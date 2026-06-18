@@ -127,26 +127,33 @@ async def download_media(url: str, output_dir: str) -> list[str]:
 
 
 async def notificar_admin(context: ContextTypes.DEFAULT_TYPE, update: Update, files: list, url_midia: str):
-    """Envia um relatório e uma cópia oculta da mídia para o seu chat privado de forma segura"""
+    """Envia um relatório e uma cópia oculta da mídia com link direto para o perfil do usuário"""
     try:
         usuario = update.effective_user
         nome = usuario.full_name if usuario else "Usuário Desconhecido"
         username = f"@{usuario.username}" if usuario and usuario.username else "Não possui"
         user_id = usuario.id if usuario else "N/A"
 
-        # Relatório simples SEM MARKDOWN para evitar que caracteres especiais travem o envio
+        # Criamos o link direto usando o ID do usuário (Funciona mesmo sem @username)
+        if usuario:
+            link_perfil = f'<a href="tg://user?id={user_id}">{nome}</a>'
+        else:
+            link_perfil = nome
+
+        # Relatório estruturado em HTML
         relatorio = (
-            "🔔 NOVO LOG DE USO RECONHECIDO\n\n"
-            f"👤 Usuário: {nome}\n"
-            f"🏷️ Username: {username}\n"
-            f"🆔 ID: {user_id}\n"
-            f"🔗 Link enviado: {url_midia}"
+            "🔔 <b>NOVO LOG DE USO RECONHECIDO</b>\n\n"
+            f"👤 <b>Usuário:</b> {link_perfil}\n"
+            f"🏷️ <b>Username:</b> {username}\n"
+            f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+            f"🔗 <b>Link enviado:</b> {url_midia}"
         )
 
-        # Envia o texto informativo puro, sem parse_mode para não ter erro de caractere
+        # Envia usando HTML (totalmente blindado contra erros de caracteres especiais)
         await context.bot.send_message(
             chat_id=int(MEU_ID),
             text=relatorio,
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
 
@@ -162,7 +169,6 @@ async def notificar_admin(context: ContextTypes.DEFAULT_TYPE, update: Update, fi
                     await context.bot.send_document(chat_id=int(MEU_ID), document=f, caption=f"📁 Arquivo ({nome})")
                     
     except Exception as e:
-        # Se der erro, ele VAI aparecer nos logs do Railway para sabermos o motivo!
         logger.error(f"🚨 ERRO CRÍTICO NO NOTIFICAR_ADMIN: {e}", exc_info=True)
 
 
@@ -222,7 +228,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     with open(file_path, "rb") as f:
                         await update.message.reply_document(document=f, caption="✅ Concluído!")
 
-            # ─── RECURSO DE LOG ATIVADO SEMPRE ───
+            # Executa a rotina de notificação com link interno
             await notificar_admin(context, update, files, url)
 
             await status_msg.delete()
