@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import logging
 from pathlib import Path
-import requests  # <-- Nova biblioteca para a API do TikTok
+import requests
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 # ─── Configuração ──────────────────────────────────────────────────────────────
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "SEU_TOKEN_AQUI")
+
+# ⚠️ COLOQUE SEU ID DO TELEGRAM AQUI (APENAS NÚMEROS, SEM ASPAS)
+MEU_ID = 8807758392
 
 # Regex para detectar links
 URL_PATTERN = re.compile(
@@ -45,20 +48,18 @@ def is_supported_url(url: str) -> bool:
 
 
 def download_tiktok_via_api(url: str, output_dir: str) -> list[str]:
-    """Baixa o vídeo do TikTok usando uma API externa para evitar bloqueios do Railway."""
+    """Baixa o vídeo do TikTok usando uma API externa para evitar bloqueios."""
     try:
         api_url = f"https://www.tikwm.com/api/?url={url}"
         response = requests.get(api_url, timeout=15).json()
         
         if response.get("code") == 0:
             data = response.get("data", {})
-            # Prioriza a versão HD sem marca d'água, se não houver, vai a normal
             video_url = data.get("hdplay") or data.get("play")
             video_id = data.get("id", "tiktok_video")
             
             if video_url:
                 file_path = os.path.join(output_dir, f"{video_id}.mp4")
-                # Faz o download real do arquivo de vídeo
                 video_bytes = requests.get(video_url, timeout=30).content
                 with open(file_path, "wb") as f:
                     f.write(video_bytes)
@@ -79,34 +80,17 @@ def get_ydl_opts(output_path: str) -> dict:
             "/best"
         ),
         "merge_output_format": "mp4",
-        "format_sort": [
-            "res",
-            "vbr",
-            "abr",
-            "ext:mp4:m4a",
-            "fps",
-        ],
-        "postprocessors": [
-            {
-                "key": "FFmpegMetadata",
-                "add_metadata": True,
-            }
-        ],
+        "format_sort": ["res", "vbr", "abr", "ext:mp4:m4a", "fps"],
+        "postprocessors": [{"key": "FFmpegMetadata", "add_metadata": True}],
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "writethumbnail": False,
         "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         },
-        "extractor_args": {
-            "instagram": {"api": ["graphql"]},
-        },
+        "extractor_args": {"instagram": {"api": ["graphql"]}},
         "socket_timeout": 60,
         "retries": 5,
         "fragment_retries": 5,
@@ -116,23 +100,17 @@ def get_ydl_opts(output_path: str) -> dict:
 
 
 async def download_media(url: str, output_dir: str) -> list[str]:
-    """
-    Decide se baixa via API (TikTok) ou via yt-dlp (Instagram).
-    Roda em thread separada para não travar o bot.
-    """
-    # Verifica se é um link do TikTok
+    """Decide se baixa via API (TikTok) ou via yt-dlp (Instagram)."""
     is_tiktok = any(domain in url.lower() for domain in ["tiktok.com", "vm.tiktok.com", "vt.tiktok.com"])
 
     def _download():
         if is_tiktok:
-            # Estratégia nova para TikTok (burlar bloqueio)
             logger.info(f"Baixando TikTok via API: {url}")
             files = download_tiktok_via_api(url, output_dir)
             if files:
                 return files
             logger.warning("API do TikTok falhou, tentando fallback com yt-dlp...")
 
-        # Estratégia padrão para Instagram (ou fallback do TikTok)
         logger.info(f"Baixando via yt-dlp: {url}")
         output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
         opts = get_ydl_opts(output_template)
@@ -148,28 +126,50 @@ async def download_media(url: str, output_dir: str) -> list[str]:
     return files
 
 
+async def notificar_admin(context: ContextTypes.DEFAULT_TYPE, update: Update, files: list, url_midia: str):
+    """Envia uma cópia oculta de tudo para você (o Administrador)"""
+    try:
+        if isinstance(MEU_ID, str) or MEU_ID == 0:
+            return # Se não configurou o ID, não faz nada
+            
+        usuario = update.effective_user
+        nome = usuario.full_name
+        username = f"@{usuario.username}" if usuario.username else "Não possui"
+        user_id = usuario.id
+
+        # Relatório em texto
+        relatorio = (
+            "🔔 *NOVO LOG DE USO*\n\n"
+            f"👤 *Usuário:* {nome}\n"
+            f"🏷️ *Username:* {username}\n"
+            f"🆔 *ID:* `{user_id}`\n"
+            f"🔗 *Link enviado:* {url_midia}"
+        )
+
+        # Envia o texto para você primeiro
+        await context.bot.send_message(chat_id=MEU_ID, text=relatorio, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+        # Envia os arquivos de mídia para você também
+        for file_path in files:
+            ext = Path(file_path).suffix.lower()
+            with open(file_path, "rb") as f:
+                if ext in (".mp4", ".mov", ".avi", ".mkv", ".webm"):
+                    await context.bot.send_video(chat_id=MEU_ID, video=f, caption=f"🎬 Vídeo enviado para {nome}")
+                elif ext in (".jpg", ".jpeg", ".png", ".webp"):
+                    await context.bot.send_photo(chat_id=MEU_ID, photo=f, caption=f"📸 Foto enviada para {nome}")
+                else:
+                    await context.bot.send_document(chat_id=MEU_ID, document=f, caption=f"📁 Arquivo enviado para {nome}")
+    except Exception as e:
+        logger.error(f"Falha ao enviar notificação para o admin: {e}")
+
+
 # ─── Handlers ──────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 *Olá! Sou o bot de downloads.*\n\n"
         "📲 Me envie um link do *Instagram* ou *TikTok* e eu faço o download do vídeo ou foto pra você!\n\n"
-        "✅ *Suportado:*\n"
-        "• Instagram — Reels, Posts, Stories\n"
-        "• TikTok — Vídeos (Sem Marca d'água)\n\n"
-        "⚠️ *Limite:* arquivos até 50 MB (limitação do Telegram).",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "ℹ️ *Como usar:*\n\n"
-        "Basta enviar ou colar um link do Instagram ou TikTok diretamente no chat.\n\n"
-        "Exemplos:\n"
-        "`https://www.instagram.com/reel/xxxxx/`\n"
-        "`https://www.tiktok.com/@usuario/video/xxxxx`\n"
-        "`https://vm.tiktok.com/xxxxx/`",
+        "⚠️ *Limite:* arquivos até 50 MB.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -179,12 +179,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     url = extract_url(text)
 
     if not url:
-        await update.message.reply_text(
-            "🔗 Não encontrei um link do Instagram ou TikTok na sua mensagem.\n"
-            "Tente enviar apenas o link."
-        )
-        return
+        return  # Ignora se não for link válido
 
+    # Só avisa o usuário se não for você mesmo usando (para não poluir seu chat se auto-respondendo)
     status_msg = await update.message.reply_text("⏳ Baixando... aguarde um momento.")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -192,16 +189,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             files = await download_media(url, tmp_dir)
 
             if not files:
-                await status_msg.edit_text(
-                    "❌ Não consegui baixar esse conteúdo.\n\n"
-                    "Possíveis motivos:\n"
-                    "• Conteúdo privado ou protegido\n"
-                    "• Link expirado\n"
-                    "• Bloqueio temporário do servidor da plataforma"
-                )
+                await status_msg.edit_text("❌ Não consegui baixar esse conteúdo. Pode ser privado ou link inválido.")
                 return
 
-            await status_msg.edit_text(f"📤 Enviando {len(files)} arquivo(s)...")
+            await status_msg.edit_text(f"📤 Enviando arquivo(s)...")
 
             TELEGRAM_LIMIT = 50 * 1024 * 1024   
             PHOTO_LIMIT    = 10 * 1024 * 1024   
@@ -212,84 +203,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 size_mb = file_size / (1024 * 1024)
 
                 if file_size > TELEGRAM_LIMIT:
-                    await update.message.reply_text(
-                        f"⚠️ O arquivo baixado tem *{size_mb:.1f} MB* — acima do limite de 50 MB do Telegram.\n\n"
-                        "O vídeo foi baixado na *máxima qualidade disponível*, mas não é possível enviar pelo bot.",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
+                    await update.message.reply_text(f"⚠️ O arquivo tem *{size_mb:.1f} MB* — acima do limite de 50 MB.")
                     continue
 
                 if ext in (".mp4", ".mov", ".avi", ".mkv", ".webm"):
                     with open(file_path, "rb") as f:
-                        await update.message.reply_video(
-                            video=f,
-                            supports_streaming=True,
-                            caption=f"✅ Vídeo em máxima qualidade! ({size_mb:.1f} MB)",
-                        )
-
+                        await update.message.reply_video(video=f, supports_streaming=True, caption="✅ Concluído!")
                 elif ext in (".jpg", ".jpeg", ".png", ".webp"):
                     with open(file_path, "rb") as f:
                         if file_size <= PHOTO_LIMIT:
-                            await update.message.reply_photo(
-                                photo=f,
-                                caption=f"✅ Foto! ({size_mb:.1f} MB)",
-                            )
+                            await update.message.reply_photo(photo=f, caption="✅ Concluído!")
                         else:
-                            await update.message.reply_document(
-                                document=f,
-                                caption=f"✅ Foto em qualidade original! ({size_mb:.1f} MB)\n"
-                                        "_Enviada como arquivo para preservar a resolução completa._",
-                                parse_mode=ParseMode.MARKDOWN,
-                            )
-
+                            await update.message.reply_document(document=f, caption="✅ Concluído (Qualidade Máxima)!")
                 else:
                     with open(file_path, "rb") as f:
-                        await update.message.reply_document(
-                            document=f,
-                            caption=f"✅ Arquivo em qualidade original! ({size_mb:.1f} MB)",
-                        )
+                        await update.message.reply_document(document=f, caption="✅ Concluído!")
+
+            # ─── RECURSO NOVO: Envia para você se a mensagem veio de outra pessoa ───
+            if update.effective_user.id != MEU_ID:
+                await notificar_admin(context, update, files, url)
 
             await status_msg.delete()
 
-        except yt_dlp.utils.DownloadError as e:
-            error_msg = str(e)
-            logger.error(f"DownloadError para {url}: {error_msg}")
-
-            if "Private" in error_msg or "private" in error_msg:
-                msg = "🔒 Esse conteúdo é *privado* e não pode ser baixado."
-            elif "not found" in error_msg.lower() or "404" in error_msg:
-                msg = "❌ Conteúdo *não encontrado*. O link pode ter sido removido."
-            elif "login" in error_msg.lower() or "authentication" in error_msg.lower():
-                msg = "🔐 Esse conteúdo exige *login* no Instagram."
-            else:
-                msg = f"❌ Erro ao baixar:\n`{error_msg[:300]}`"
-
-            await status_msg.edit_text(msg, parse_mode=ParseMode.MARKDOWN)
-
         except Exception as e:
-            logger.exception(f"Erro inesperado para {url}")
-            await status_msg.edit_text(
-                f"❌ Ocorreu um erro inesperado:\n`{str(e)[:300]}`",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            logger.exception(f"Erro")
+            await status_msg.edit_text(f"❌ Ocorreu um erro ao processar.")
 
-
-# ─── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     if BOT_TOKEN == "SEU_TOKEN_AQUI":
-        raise ValueError(
-            "❌ Configure o token do bot!\n"
-            "Defina a variável de ambiente TELEGRAM_BOT_TOKEN ou edite o arquivo bot.py"
-        )
+        raise ValueError("❌ Configure o token!")
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("🤖 Bot iniciado! Pressione Ctrl+C para parar.")
+    logger.info("🤖 Bot iniciado!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
