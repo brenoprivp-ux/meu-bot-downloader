@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import logging
 import http.cookiejar
+import base64
 from pathlib import Path
 
 from telegram import Update
@@ -32,6 +33,9 @@ ANY_LINK = re.compile(
 POST_RE      = re.compile(r"instagram\.com/(?:p|reel|tv|r)/([A-Za-z0-9_-]+)", re.IGNORECASE)
 STORY_RE     = re.compile(r"instagram\.com/stories/([^/]+)/(\d+)",              re.IGNORECASE)
 HIGHLIGHT_RE = re.compile(r"instagram\.com/stories/highlights/(\d+)",           re.IGNORECASE)
+# Links de destaque compartilhados via /s/ com ID em base64
+# Ex: instagram.com/s/aGlnaGxpZ2h0OjE4MDQy...?story_media_id=...
+HIGHLIGHT_B64_RE = re.compile(r"instagram\.com/s/([A-Za-z0-9+/=_-]+)", re.IGNORECASE)
 
 MEDIA_EXTS = {".mp4", ".jpg", ".jpeg", ".png", ".webp", ".mov"}
 
@@ -99,6 +103,22 @@ def get_loader() -> instaloader.Instaloader:
 def reset_loader():
     global _loader
     _loader = None
+
+
+def decode_highlight_b64(encoded: str) -> int | None:
+    """Decodifica o ID de destaque em base64 do formato /s/ do Instagram."""
+    try:
+        # Normaliza URL-safe base64 para base64 padrão e adiciona padding
+        encoded = encoded.replace("-", "+").replace("_", "/")
+        padding = 4 - len(encoded) % 4
+        if padding != 4:
+            encoded += "=" * padding
+        decoded = base64.b64decode(encoded).decode("utf-8")
+        # Formato esperado: "highlight:18042166463437142"
+        m = re.search(r"highlight:(\d+)", decoded)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
 
 
 def collect_files(directory: str) -> list[str]:
@@ -284,6 +304,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if (m := HIGHLIGHT_RE.search(url)):
                     await status.edit_text("⏳ Baixando destaque...")
                     files = await run(_dl_highlight, int(m.group(1)), tmp)
+
+                elif (m := HIGHLIGHT_B64_RE.search(url)):
+                    # Links do tipo /s/aGlnaGxpZ2h0... (compartilhados via share sheet)
+                    highlight_id = decode_highlight_b64(m.group(1))
+                    if not highlight_id:
+                        await status.edit_text("❌ Não consegui identificar o destaque nesse link.")
+                        return
+                    await status.edit_text("⏳ Baixando destaque...")
+                    files = await run(_dl_highlight, highlight_id, tmp)
 
                 elif (m := STORY_RE.search(url)):
                     await status.edit_text("⏳ Baixando story...")
