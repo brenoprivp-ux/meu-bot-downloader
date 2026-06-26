@@ -41,17 +41,28 @@ _loader: instaloader.Instaloader | None = None
 
 def get_loader() -> instaloader.Instaloader:
     """
-    Retorna instância do Instaloader autenticada via cookies.txt (formato Netscape).
-    O cookies.txt é exportado pelo Chrome com a extensão 'Get cookies.txt LOCALLY'.
+    Autentica o Instaloader via cookies.txt (formato Netscape/Mozilla).
+    Usa L.load_session() com os campos que o instaloader realmente espera.
     """
     global _loader
     if _loader is not None:
         return _loader
 
     if not os.path.isfile(COOKIES_FILE):
-        raise FileNotFoundError(
-            "cookies.txt não encontrado. "
-            "Faça upload do arquivo no repositório GitHub."
+        raise FileNotFoundError("cookies.txt não encontrado. Faça upload no repositório GitHub.")
+
+    # Lê o cookies.txt e monta um dicionário nome→valor
+    jar = http.cookiejar.MozillaCookieJar()
+    jar.load(COOKIES_FILE, ignore_discard=True, ignore_expires=True)
+    cookies = {c.name: c.value for c in jar if "instagram.com" in c.domain}
+
+    # Campos obrigatórios para o instaloader funcionar autenticado
+    required = ["sessionid", "csrftoken", "ds_user_id"]
+    missing  = [k for k in required if k not in cookies]
+    if missing:
+        raise instaloader.exceptions.LoginRequiredException(
+            f"Os seguintes cookies estão faltando no cookies.txt: {missing}. "
+            "Certifique-se de exportar os cookies estando logado no Instagram."
         )
 
     L = instaloader.Instaloader(
@@ -65,35 +76,19 @@ def get_loader() -> instaloader.Instaloader:
         quiet=True,
     )
 
-    # Carrega cookies no formato Netscape diretamente na sessão interna do instaloader
-    cookie_jar = http.cookiejar.MozillaCookieJar()
-    cookie_jar.load(COOKIES_FILE, ignore_discard=True, ignore_expires=True)
+    # load_session é o método oficial do instaloader para carregar uma sessão
+    # sem fazer nenhuma requisição ao Instagram — não dispara checkpoint
+    username = cookies.get("ds_user", cookies["ds_user_id"])  # fallback para o ID numérico
+    L.load_session(username, cookies)
 
-    # O instaloader usa requests internamente; injetamos os cookies na sessão
-    for cookie in cookie_jar:
-        L.context._session.cookies.set(
-            name=cookie.name,
-            value=cookie.value,
-            domain=cookie.domain,
-            path=cookie.path,
-        )
-
-    # Extrai o username do cookie "ds_user" (presente em todo cookies.txt do Instagram)
-    # sem fazer nenhuma requisição ao Instagram — evita o checkpoint
-    ds_user = L.context._session.cookies.get("ds_user", domain=".instagram.com") \
-           or L.context._session.cookies.get("ds_user")
-    if not ds_user:
-        raise instaloader.exceptions.LoginRequiredException(
-            "Cookie 'ds_user' não encontrado. "
-            "Os cookies parecem inválidos ou incompletos. "
-            "Exporte um novo cookies.txt estando logado no Instagram e faça upload no GitHub."
-        )
-
-    L.context.username = ds_user
-    logger.info(f"Instagram autenticado via cookies como: {ds_user}")
-
+    logger.info(f"Instagram autenticado via cookies (ds_user_id={cookies['ds_user_id']})")
     _loader = L
     return _loader
+
+
+def reset_loader():
+    global _loader
+    _loader = None
 
 
 def collect_files(directory: str) -> list[str]:
@@ -154,6 +149,7 @@ def _dl_highlight(highlight_id: int, out: str) -> list[str]:
         L.download_storyitem(item, target=out)
 
     return collect_files(out)
+
 
 # ─── Download TikTok ───────────────────────────────────────────────────────────
 
@@ -315,21 +311,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except FileNotFoundError as e:
             await status.edit_text(f"⚠️ {e}")
 
-        except instaloader.exceptions.LoginRequiredException:
-            # Reseta o loader para forçar nova autenticação na próxima tentativa
-            global _loader
-            _loader = None
+        except instaloader.exceptions.LoginRequiredException as e:
+            reset_loader()
             await status.edit_text(
-                "🔐 *Sessão expirada ou cookies inválidos.*\n\n"
-                "Exporte um novo `cookies.txt` do Instagram no Chrome e faça upload no GitHub.",
+                f"🔐 *Problema com os cookies do Instagram:*\n`{str(e)[:300]}`\n\n"
+                "Exporte um novo `cookies.txt` estando logado no Chrome e faça upload no GitHub.",
                 parse_mode=ParseMode.MARKDOWN,
             )
         except instaloader.exceptions.PrivateProfileNotFollowedException:
             await status.edit_text("🔒 Perfil privado. A conta precisa seguir esse perfil.")
         except instaloader.exceptions.TooManyRequestsException:
-            await status.edit_text("⏱️ Instagram bloqueou temporariamente. Tente novamente em alguns minutos.")
+            await status.edit_text("⏱️ Instagram bloqueou temporariamente. Tente em alguns minutos.")
         except instaloader.exceptions.InstaloaderException as e:
             logger.error(f"InstaloaderException: {e}")
+            reset_loader()
             await status.edit_text(f"❌ Erro do Instagram:\n`{str(e)[:300]}`", parse_mode=ParseMode.MARKDOWN)
         except ValueError as e:
             await status.edit_text(f"❌ {e}")
