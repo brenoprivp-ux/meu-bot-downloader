@@ -42,7 +42,7 @@ _loader: instaloader.Instaloader | None = None
 def get_loader() -> instaloader.Instaloader:
     """
     Autentica o Instaloader via cookies.txt (formato Netscape/Mozilla).
-    Usa L.load_session() com os campos que o instaloader realmente espera.
+    Autentica via cookies.txt sem nenhuma requisição ao Instagram.
     """
     global _loader
     if _loader is not None:
@@ -76,10 +76,20 @@ def get_loader() -> instaloader.Instaloader:
         quiet=True,
     )
 
-    # load_session é o método oficial do instaloader para carregar uma sessão
-    # sem fazer nenhuma requisição ao Instagram — não dispara checkpoint
-    username = cookies.get("ds_user", cookies["ds_user_id"])  # fallback para o ID numérico
-    L.load_session(username, cookies)
+    # Injeta todos os cookies diretamente na sessão requests interna.
+    # Não faz nenhuma requisição ao Instagram aqui — zero risco de checkpoint.
+    for c in jar:
+        if "instagram.com" in c.domain:
+            L.context._session.cookies.set(
+                name=c.name,
+                value=c.value,
+                domain=c.domain,
+                path=c.path,
+            )
+
+    # ds_user_id é o identificador numérico do usuário — o instaloader usa
+    # context.username apenas internamente para logs e arquivos de sessão
+    L.context.username = cookies["ds_user_id"]
 
     logger.info(f"Instagram autenticado via cookies (ds_user_id={cookies['ds_user_id']})")
     _loader = L
