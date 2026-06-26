@@ -3,6 +3,7 @@ import re
 import asyncio
 import tempfile
 import logging
+import http.cookiejar
 from pathlib import Path
 
 from telegram import Update
@@ -19,75 +20,89 @@ logger = logging.getLogger(__name__)
 
 # ─── Configuração ──────────────────────────────────────────────────────────────
 
-BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-IG_USER     = os.getenv("INSTAGRAM_USER", "")
-IG_PASS     = os.getenv("INSTAGRAM_PASS", "")
+BOT_TOKEN    = os.getenv("TELEGRAM_BOT_TOKEN", "")
+COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
 
 # ─── Padrões de URL ────────────────────────────────────────────────────────────
 
-# Detecta qualquer link do Instagram ou TikTok no texto
 ANY_LINK = re.compile(
     r"https?://(?:www\.)?(?:instagram\.com|instagr\.am|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)[^\s]*",
     re.IGNORECASE,
 )
-
-# /p/CODE  /reel/CODE  /tv/CODE  /r/CODE  — posts normais
-POST_RE = re.compile(
-    r"instagram\.com/(?:p|reel|tv|r)/([A-Za-z0-9_-]+)",
-    re.IGNORECASE,
-)
-
-# /stories/USERNAME/MEDIAID/
-STORY_RE = re.compile(
-    r"instagram\.com/stories/([^/]+)/(\d+)",
-    re.IGNORECASE,
-)
-
-# /stories/highlights/HIGHLIGHT_ID/
-HIGHLIGHT_RE = re.compile(
-    r"instagram\.com/stories/highlights/(\d+)",
-    re.IGNORECASE,
-)
+POST_RE      = re.compile(r"instagram\.com/(?:p|reel|tv|r)/([A-Za-z0-9_-]+)", re.IGNORECASE)
+STORY_RE     = re.compile(r"instagram\.com/stories/([^/]+)/(\d+)",              re.IGNORECASE)
+HIGHLIGHT_RE = re.compile(r"instagram\.com/stories/highlights/(\d+)",           re.IGNORECASE)
 
 MEDIA_EXTS = {".mp4", ".jpg", ".jpeg", ".png", ".webp", ".mov"}
 
-# ─── Login compartilhado ────────────────────────────────────────────────────────
+# ─── Loader compartilhado ──────────────────────────────────────────────────────
 
 _loader: instaloader.Instaloader | None = None
 
-def get_loader(output_dir: str = "/tmp") -> instaloader.Instaloader:
-    """Retorna instância do Instaloader com login, reutilizando sessão."""
+def get_loader() -> instaloader.Instaloader:
+    """
+    Retorna instância do Instaloader autenticada via cookies.txt (formato Netscape).
+    O cookies.txt é exportado pelo Chrome com a extensão 'Get cookies.txt LOCALLY'.
+    """
     global _loader
-    if _loader is None:
-        _loader = instaloader.Instaloader(
-            download_pictures=True,
-            download_videos=True,
-            download_video_thumbnails=False,
-            download_geotags=False,
-            download_comments=False,
-            save_metadata=False,
-            compress_json=False,
-            quiet=True,
+    if _loader is not None:
+        return _loader
+
+    if not os.path.isfile(COOKIES_FILE):
+        raise FileNotFoundError(
+            "cookies.txt não encontrado. "
+            "Faça upload do arquivo no repositório GitHub."
         )
-        if IG_USER and IG_PASS:
-            try:
-                _loader.login(IG_USER, IG_PASS)
-                logger.info(f"Login Instagram OK: {IG_USER}")
-            except Exception as e:
-                logger.error(f"Falha login Instagram: {e}")
-                _loader = None
-                raise
+
+    L = instaloader.Instaloader(
+        download_pictures=True,
+        download_videos=True,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        compress_json=False,
+        quiet=True,
+    )
+
+    # Carrega cookies no formato Netscape diretamente na sessão interna do instaloader
+    cookie_jar = http.cookiejar.MozillaCookieJar()
+    cookie_jar.load(COOKIES_FILE, ignore_discard=True, ignore_expires=True)
+
+    # O instaloader usa requests internamente; injetamos os cookies na sessão
+    for cookie in cookie_jar:
+        L.context._session.cookies.set(
+            name=cookie.name,
+            value=cookie.value,
+            domain=cookie.domain,
+            path=cookie.path,
+        )
+
+    # Extrai o username do cookie "ds_user" (presente em todo cookies.txt do Instagram)
+    # sem fazer nenhuma requisição ao Instagram — evita o checkpoint
+    ds_user = L.context._session.cookies.get("ds_user", domain=".instagram.com") \
+           or L.context._session.cookies.get("ds_user")
+    if not ds_user:
+        raise instaloader.exceptions.LoginRequiredException(
+            "Cookie 'ds_user' não encontrado. "
+            "Os cookies parecem inválidos ou incompletos. "
+            "Exporte um novo cookies.txt estando logado no Instagram e faça upload no GitHub."
+        )
+
+    L.context.username = ds_user
+    logger.info(f"Instagram autenticado via cookies como: {ds_user}")
+
+    _loader = L
     return _loader
 
 
 def collect_files(directory: str) -> list[str]:
-    """Coleta arquivos de mídia de um diretório."""
     return sorted(
         str(f) for f in Path(directory).rglob("*")
         if f.suffix.lower() in MEDIA_EXTS and f.is_file()
     )
 
-# ─── Download: Post normal ──────────────────────────────────────────────────────
+# ─── Downloads Instagram ───────────────────────────────────────────────────────
 
 def _dl_post(shortcode: str, out: str) -> list[str]:
     L = get_loader()
@@ -97,55 +112,50 @@ def _dl_post(shortcode: str, out: str) -> list[str]:
     L.download_post(post, target=out)
     return collect_files(out)
 
-# ─── Download: Story individual ─────────────────────────────────────────────────
 
 def _dl_story(username: str, mediaid: int, out: str) -> list[str]:
     L = get_loader()
+    L.dirname_pattern  = out
+    L.filename_pattern = "{mediaid}"
     profile = instaloader.Profile.from_username(L.context, username)
-    # Percorre stories do perfil até achar o mediaid certo
     for story in L.get_stories(userids=[profile.userid]):
         for item in story.get_items():
             if item.mediaid == mediaid:
-                L.dirname_pattern  = out
-                L.filename_pattern = "{mediaid}"
                 L.download_storyitem(item, target=out)
                 return collect_files(out)
-    raise ValueError(f"Story {mediaid} não encontrado ou já expirou.")
+    raise ValueError("Story não encontrado ou já expirou (stories duram 24h).")
 
-# ─── Download: Destaque (Highlight) ────────────────────────────────────────────
 
 def _dl_highlight(highlight_id: int, out: str) -> list[str]:
     L = get_loader()
     L.dirname_pattern  = out
     L.filename_pattern = "{mediaid}"
 
-    # get_highlights aceita um Profile, mas precisamos achar pelo ID numérico.
-    # Usamos a API interna para buscar o highlight diretamente pelo ID.
     data = L.context.graphql_query(
         "45246d3fe16ccc6577e0bd297a5db1ab",
-        {"reel_ids": [], "tag_names": [], "location_ids": [],
-         "highlight_reel_ids": [str(highlight_id)],
-         "precomposed_overlay": False, "show_story_viewer_list": True,
-         "story_viewer_fetch_count": 50, "story_viewer_cursor": "",
-         "stories_video_dash_manifest": False},
+        {
+            "reel_ids": [], "tag_names": [], "location_ids": [],
+            "highlight_reel_ids": [str(highlight_id)],
+            "precomposed_overlay": False,
+            "show_story_viewer_list": True,
+            "story_viewer_fetch_count": 50,
+            "story_viewer_cursor": "",
+            "stories_video_dash_manifest": False,
+        },
     )
-    edges = (data.get("data", {})
-                 .get("reels_media", []))
-
-    if not edges:
+    reels = data.get("data", {}).get("reels_media", [])
+    if not reels:
         raise ValueError("Destaque não encontrado ou privado.")
 
-    reel = edges[0]
-    owner_node = reel.get("owner", {})
-    owner_profile = instaloader.Profile(L.context, owner_node)
-
+    reel = reels[0]
+    owner_profile = instaloader.Profile(L.context, reel.get("owner", {}))
     for item_node in reel.get("items", []):
         item = instaloader.StoryItem(L.context, item_node, owner_profile)
         L.download_storyitem(item, target=out)
 
     return collect_files(out)
 
-# ─── Download: TikTok ──────────────────────────────────────────────────────────
+# ─── Download TikTok ───────────────────────────────────────────────────────────
 
 def _dl_tiktok(url: str, out: str) -> list[str]:
     tmpl = os.path.join(out, "%(id)s.%(ext)s")
@@ -180,11 +190,10 @@ def _dl_tiktok(url: str, out: str) -> list[str]:
     after = set(Path(out).iterdir())
     return sorted(str(f) for f in (after - before))
 
-# ─── Wrappers async ────────────────────────────────────────────────────────────
+# ─── Async wrapper ─────────────────────────────────────────────────────────────
 
 async def run(fn, *args):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, fn, *args)
+    return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
 
 # ─── Envio de arquivos ─────────────────────────────────────────────────────────
 
@@ -195,13 +204,13 @@ async def send_files(update: Update, files: list[str]) -> None:
     for fp in files:
         if not os.path.isfile(fp):
             continue
-        size     = os.path.getsize(fp)
-        size_mb  = size / (1024 * 1024)
-        ext      = Path(fp).suffix.lower()
+        size    = os.path.getsize(fp)
+        size_mb = size / (1024 * 1024)
+        ext     = Path(fp).suffix.lower()
 
         if size > LIMIT:
             await update.message.reply_text(
-                f"⚠️ Um arquivo tem *{size_mb:.1f} MB* — acima do limite de 50 MB do Telegram.",
+                f"⚠️ Arquivo com *{size_mb:.1f} MB* — acima do limite de 50 MB do Telegram.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             continue
@@ -209,67 +218,52 @@ async def send_files(update: Update, files: list[str]) -> None:
         with open(fp, "rb") as f:
             if ext in (".mp4", ".mov", ".avi", ".mkv", ".webm"):
                 await update.message.reply_video(
-                    video=f,
-                    supports_streaming=True,
+                    video=f, supports_streaming=True,
                     caption=f"✅ Vídeo ({size_mb:.1f} MB)",
                 )
             elif ext in (".jpg", ".jpeg", ".png", ".webp"):
                 if size <= PHOTO_LIMIT:
-                    await update.message.reply_photo(
-                        photo=f,
-                        caption=f"✅ Foto ({size_mb:.1f} MB)",
-                    )
+                    await update.message.reply_photo(photo=f, caption=f"✅ Foto ({size_mb:.1f} MB)")
                 else:
-                    await update.message.reply_document(
-                        document=f,
-                        caption=f"✅ Foto em qualidade original ({size_mb:.1f} MB)",
-                    )
+                    await update.message.reply_document(document=f, caption=f"✅ Foto original ({size_mb:.1f} MB)")
             else:
-                await update.message.reply_document(
-                    document=f,
-                    caption=f"✅ Arquivo ({size_mb:.1f} MB)",
-                )
+                await update.message.reply_document(document=f, caption=f"✅ Arquivo ({size_mb:.1f} MB)")
 
 # ─── Handlers ──────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    ig = "✅ configurado" if (IG_USER and IG_PASS) else "❌ não configurado"
+    cookies_ok = "✅ encontrado" if os.path.isfile(COOKIES_FILE) else "❌ não encontrado"
     await update.message.reply_text(
         "👋 *Olá! Sou o bot de downloads.*\n\n"
         "📲 Me envie um link do *Instagram* ou *TikTok*!\n\n"
         "✅ *Suporto:*\n"
         "• Instagram — Posts, Reels, Fotos, Stories, Destaques\n"
         "• TikTok — Vídeos\n\n"
-        f"📷 *Instagram login:* {ig}\n"
-        "⚠️ *Limite de envio:* 50 MB por arquivo.",
+        f"🍪 *Cookies Instagram:* {cookies_ok}\n"
+        "⚠️ *Limite:* 50 MB por arquivo.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Garante que a mensagem existe e tem texto
     if not update.message or not update.message.text:
         return
 
-    text = update.message.text
-    match = ANY_LINK.search(text)
-
-    if not match:
+    url_match = ANY_LINK.search(update.message.text)
+    if not url_match:
         await update.message.reply_text(
-            "🔗 Não encontrei um link do Instagram ou TikTok na sua mensagem.\n"
-            "Envie apenas o link."
+            "🔗 Não encontrei um link do Instagram ou TikTok.\nEnvie apenas o link."
         )
         return
 
-    url = match.group(0)
-    logger.info(f"URL recebida de {update.effective_user.id}: {url}")
-
-    # Credenciais obrigatórias para Instagram
+    url   = url_match.group(0)
     is_ig = any(d in url.lower() for d in ["instagram.com", "instagr.am"])
-    if is_ig and not (IG_USER and IG_PASS):
+    logger.info(f"URL de {update.effective_user.id}: {url}")
+
+    if is_ig and not os.path.isfile(COOKIES_FILE):
         await update.message.reply_text(
-            "⚠️ *Credenciais do Instagram não configuradas.*\n"
-            "Configure `INSTAGRAM_USER` e `INSTAGRAM_PASS` no Railway.",
+            "⚠️ *cookies.txt não encontrado.*\n\n"
+            "Faça upload do arquivo no repositório GitHub e aguarde o Railway atualizar.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -281,34 +275,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             files: list[str] = []
 
             if is_ig:
-                # ── Destaque ──────────────────────────────────────────────────
-                hl = HIGHLIGHT_RE.search(url)
-                if hl:
+                if (m := HIGHLIGHT_RE.search(url)):
                     await status.edit_text("⏳ Baixando destaque...")
-                    highlight_id = int(hl.group(1))
-                    files = await run(_dl_highlight, highlight_id, tmp)
+                    files = await run(_dl_highlight, int(m.group(1)), tmp)
 
-                # ── Story individual ──────────────────────────────────────────
-                elif (st := STORY_RE.search(url)):
+                elif (m := STORY_RE.search(url)):
                     await status.edit_text("⏳ Baixando story...")
-                    username = st.group(1)
-                    mediaid  = int(st.group(2))
-                    files = await run(_dl_story, username, mediaid, tmp)
+                    files = await run(_dl_story, m.group(1), int(m.group(2)), tmp)
 
-                # ── Post / Reel / Foto ────────────────────────────────────────
-                elif (po := POST_RE.search(url)):
-                    await status.edit_text("⏳ Baixando post...")
-                    files = await run(_dl_post, po.group(1), tmp)
+                elif (m := POST_RE.search(url)):
+                    await status.edit_text("⏳ Baixando post/reel...")
+                    files = await run(_dl_post, m.group(1), tmp)
 
                 else:
                     await status.edit_text(
-                        "❌ Não reconheci esse tipo de link do Instagram.\n"
+                        "❌ Tipo de link do Instagram não reconhecido.\n"
                         "Suportado: posts, reels, stories e destaques."
                     )
                     return
 
             else:
-                # ── TikTok ────────────────────────────────────────────────────
                 await status.edit_text("⏳ Baixando TikTok...")
                 files = await run(_dl_tiktok, url, tmp)
 
@@ -317,7 +303,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "❌ Nenhum arquivo foi baixado.\n\n"
                     "Possíveis causas:\n"
                     "• Conteúdo privado\n"
-                    "• Story já expirou\n"
+                    "• Story já expirou (duram 24h)\n"
                     "• Link inválido ou removido"
                 )
                 return
@@ -326,22 +312,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await send_files(update, files)
             await status.delete()
 
-        # ── Erros específicos do Instagram ────────────────────────────────────
+        except FileNotFoundError as e:
+            await status.edit_text(f"⚠️ {e}")
+
         except instaloader.exceptions.LoginRequiredException:
-            await status.edit_text("🔐 Login necessário. Verifique `INSTAGRAM_USER` e `INSTAGRAM_PASS`.", parse_mode=ParseMode.MARKDOWN)
-        except instaloader.exceptions.BadCredentialsException:
-            await status.edit_text("❌ Usuário ou senha do Instagram incorretos.")
+            # Reseta o loader para forçar nova autenticação na próxima tentativa
+            global _loader
+            _loader = None
+            await status.edit_text(
+                "🔐 *Sessão expirada ou cookies inválidos.*\n\n"
+                "Exporte um novo `cookies.txt` do Instagram no Chrome e faça upload no GitHub.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
         except instaloader.exceptions.PrivateProfileNotFollowedException:
-            await status.edit_text("🔒 Perfil privado. A conta do bot precisa seguir esse perfil.")
+            await status.edit_text("🔒 Perfil privado. A conta precisa seguir esse perfil.")
         except instaloader.exceptions.TooManyRequestsException:
-            await status.edit_text("⏱️ Instagram bloqueou temporariamente as requisições. Tente novamente em alguns minutos.")
+            await status.edit_text("⏱️ Instagram bloqueou temporariamente. Tente novamente em alguns minutos.")
         except instaloader.exceptions.InstaloaderException as e:
             logger.error(f"InstaloaderException: {e}")
             await status.edit_text(f"❌ Erro do Instagram:\n`{str(e)[:300]}`", parse_mode=ParseMode.MARKDOWN)
         except ValueError as e:
             await status.edit_text(f"❌ {e}")
-
-        # ── Erros do TikTok ───────────────────────────────────────────────────
         except yt_dlp.utils.DownloadError as e:
             msg = str(e)
             if "private" in msg.lower():
@@ -349,8 +340,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             elif "404" in msg or "not found" in msg.lower():
                 await status.edit_text("❌ Conteúdo não encontrado ou removido.")
             else:
-                await status.edit_text(f"❌ Erro ao baixar:\n`{msg[:300]}`", parse_mode=ParseMode.MARKDOWN)
-
+                await status.edit_text(f"❌ Erro TikTok:\n`{msg[:300]}`", parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
             logger.exception(f"Erro inesperado: {e}")
             await status.edit_text(f"❌ Erro inesperado:\n`{str(e)[:300]}`", parse_mode=ParseMode.MARKDOWN)
@@ -359,23 +349,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def main() -> None:
     if not BOT_TOKEN:
-        raise ValueError("Configure a variável TELEGRAM_BOT_TOKEN")
+        raise ValueError("Configure TELEGRAM_BOT_TOKEN")
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
-
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  start))
-    # Captura TODAS as mensagens de texto, incluindo as que vêm de grupos
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("🤖 Bot iniciado!")
     app.run_polling(
-        allowed_updates=["message"],   # garante receber mensagens privadas e de grupo
-        drop_pending_updates=True,     # ignora mensagens acumuladas enquanto estava offline
+        allowed_updates=["message"],
+        drop_pending_updates=True,
     )
 
 if __name__ == "__main__":
