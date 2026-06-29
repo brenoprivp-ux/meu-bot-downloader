@@ -152,22 +152,47 @@ def _dl_post(shortcode: str, out: str) -> list[str]:
 def _dl_story(username: str, mediaid: int, out: str) -> list[str]:
     s = get_session()
 
-    # Busca o userid pelo username
-    resp = s.get(f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}", timeout=30)
-    resp.raise_for_status()
-    user_id = resp.json()["data"]["user"]["id"]
+    # Busca user_id via endpoint de busca (menos restritivo que web_profile_info)
+    import time, random
+    time.sleep(random.uniform(1.5, 3.0))  # pausa para evitar rate limit
 
-    # Busca os stories do usuário
-    resp = s.get(f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={user_id}", timeout=30)
+    resp = s.get(
+        "https://www.instagram.com/api/v1/users/search/",
+        params={"q": username, "count": 1},
+        timeout=30,
+    )
+    if resp.status_code == 429:
+        raise ValueError("Instagram bloqueou temporariamente. Tente novamente em alguns minutos.")
+    resp.raise_for_status()
+
+    results = resp.json().get("users", [])
+    user_id = None
+    for u in results:
+        if u.get("username", "").lower() == username.lower():
+            user_id = u["pk"]
+            break
+
+    if not user_id:
+        raise ValueError(f"Usuário @{username} não encontrado.")
+
+    # Busca os stories usando o user_id
+    time.sleep(random.uniform(1.0, 2.0))
+    resp = s.get(
+        f"https://www.instagram.com/api/v1/feed/reels_media/",
+        params={"reel_ids": user_id},
+        timeout=30,
+    )
+    if resp.status_code == 429:
+        raise ValueError("Instagram bloqueou temporariamente. Tente novamente em alguns minutos.")
     resp.raise_for_status()
     reels = resp.json().get("reels_media", [])
 
     if not reels:
-        raise ValueError("Nenhum story encontrado para esse usuário.")
+        raise ValueError("Nenhum story ativo encontrado para esse usuário.")
 
     for item in reels[0].get("items", []):
-        pk = int(item.get("pk", item.get("id", "0")).split("_")[0])
-        if pk != mediaid:
+        pk = str(item.get("pk", item.get("id", "0"))).split("_")[0]
+        if int(pk) != mediaid:
             continue
         if item.get("video_versions"):
             best = sorted(item["video_versions"], key=lambda v: v.get("width", 0), reverse=True)[0]
