@@ -150,80 +150,70 @@ def _dl_post(shortcode: str, out: str) -> list[str]:
 # ─── Download: Story ───────────────────────────────────────────────────────────
 
 def _dl_story(username: str, mediaid: int, out: str) -> list[str]:
+    """
+    Baixa story diretamente pelo mediaid — sem precisar buscar user_id.
+    O mediaid já está na URL do story, então usamos /api/v1/media/{mediaid}/info/
+    """
     s = get_session()
 
-    # Busca user_id via endpoint de busca (menos restritivo que web_profile_info)
-    import time, random
-    time.sleep(random.uniform(1.5, 3.0))  # pausa para evitar rate limit
-
-    resp = s.get(
-        "https://www.instagram.com/api/v1/users/search/",
-        params={"q": username, "count": 1},
-        timeout=30,
-    )
-    if resp.status_code == 429:
-        raise ValueError("Instagram bloqueou temporariamente. Tente novamente em alguns minutos.")
-    resp.raise_for_status()
-
-    results = resp.json().get("users", [])
-    user_id = None
-    for u in results:
-        if u.get("username", "").lower() == username.lower():
-            user_id = u["pk"]
+    # Acessa a mídia diretamente pelo ID — sem rate limit de busca de usuário
+    for base in ["https://www.instagram.com", "https://i.instagram.com"]:
+        resp = s.get(f"{base}/api/v1/media/{mediaid}/info/", timeout=30)
+        if resp.status_code == 200:
             break
+        if resp.status_code == 429:
+            raise ValueError("Instagram bloqueou temporariamente. Tente em alguns minutos.")
 
-    if not user_id:
-        raise ValueError(f"Usuário @{username} não encontrado.")
-
-    # Busca os stories usando o user_id
-    time.sleep(random.uniform(1.0, 2.0))
-    resp = s.get(
-        f"https://www.instagram.com/api/v1/feed/reels_media/",
-        params={"reel_ids": user_id},
-        timeout=30,
-    )
-    if resp.status_code == 429:
-        raise ValueError("Instagram bloqueou temporariamente. Tente novamente em alguns minutos.")
+    if resp.status_code == 404:
+        raise ValueError("Story não encontrado ou já expirou (stories duram 24h).")
     resp.raise_for_status()
-    reels = resp.json().get("reels_media", [])
 
-    if not reels:
-        raise ValueError("Nenhum story ativo encontrado para esse usuário.")
+    items = resp.json().get("items", [])
+    if not items:
+        raise ValueError("Story não encontrado ou já expirou (stories duram 24h).")
 
-    for item in reels[0].get("items", []):
-        pk = str(item.get("pk", item.get("id", "0"))).split("_")[0]
-        if int(pk) != mediaid:
-            continue
-        if item.get("video_versions"):
-            best = sorted(item["video_versions"], key=lambda v: v.get("width", 0), reverse=True)[0]
-            dest = os.path.join(out, f"{mediaid}.mp4")
-            download_file(s, best["url"], dest)
-        else:
-            candidates = item.get("image_versions2", {}).get("candidates", [])
-            if candidates:
-                best = sorted(candidates, key=lambda v: v.get("width", 0), reverse=True)[0]
-                dest = os.path.join(out, f"{mediaid}.jpg")
-                download_file(s, best["url"], dest)
-        return collect_files(out)
+    item = items[0]
+    if item.get("video_versions"):
+        best = sorted(item["video_versions"], key=lambda v: v.get("width", 0), reverse=True)[0]
+        dest = os.path.join(out, f"{mediaid}.mp4")
+        download_file(s, best["url"], dest)
+    else:
+        candidates = item.get("image_versions2", {}).get("candidates", [])
+        if not candidates:
+            raise ValueError("Nenhuma mídia encontrada neste story.")
+        best = sorted(candidates, key=lambda v: v.get("width", 0), reverse=True)[0]
+        dest = os.path.join(out, f"{mediaid}.jpg")
+        download_file(s, best["url"], dest)
 
-    raise ValueError("Story não encontrado ou já expirou (stories duram 24h).")
+    return collect_files(out)
 
 # ─── Download: Destaque ────────────────────────────────────────────────────────
 
 def _dl_highlight(highlight_id: int, out: str) -> list[str]:
     s = get_session()
 
-    resp = s.get(
-        f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=highlight:{highlight_id}",
-        timeout=30,
-    )
-    resp.raise_for_status()
-    reels = resp.json().get("reels_media", [])
+    # Tenta os dois hosts — i.instagram.com tem menos rate limit
+    data = None
+    for base in ["https://i.instagram.com", "https://www.instagram.com"]:
+        resp = s.get(
+            f"{base}/api/v1/feed/reels_media/",
+            params={"reel_ids": f"highlight:{highlight_id}"},
+            timeout=30,
+        )
+        if resp.status_code == 429:
+            raise ValueError("Instagram bloqueou temporariamente. Tente em alguns minutos.")
+        if resp.status_code == 200:
+            data = resp.json()
+            break
 
-    if not reels:
+    if not data:
+        resp.raise_for_status()
+
+    reels = data.get("reels_media", [])
+    if not reels or not reels[0].get("items"):
         raise ValueError("Destaque não encontrado ou privado.")
 
-    for i, item in enumerate(reels[0].get("items", [])):
+    for i, item in enumerate(reels[0]["items"]):
         if item.get("video_versions"):
             best = sorted(item["video_versions"], key=lambda v: v.get("width", 0), reverse=True)[0]
             dest = os.path.join(out, f"highlight_{i}.mp4")
