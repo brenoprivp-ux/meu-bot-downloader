@@ -129,13 +129,43 @@ def collect_files(directory: str) -> list[str]:
 
 # ─── Downloads Instagram ───────────────────────────────────────────────────────
 
-def _dl_post(shortcode: str, out: str) -> list[str]:
-    L = get_loader()
-    L.dirname_pattern  = out
-    L.filename_pattern = "{shortcode}"
-    post = instaloader.Post.from_shortcode(L.context, shortcode)
-    L.download_post(post, target=out)
-    return collect_files(out)
+def _dl_post(url: str, out: str) -> list[str]:
+    """Baixa posts e reels do Instagram via yt-dlp com cookies."""
+    cookies_file = COOKIES_FILE if os.path.isfile(COOKIES_FILE) else None
+    tmpl = os.path.join(out, "%(id)s.%(ext)s")
+    opts = {
+        "outtmpl": tmpl,
+        "format": (
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+            "/bestvideo[ext=mp4]+bestaudio"
+            "/bestvideo+bestaudio/best[ext=mp4]/best"
+        ),
+        "merge_output_format": "mp4",
+        "format_sort": ["res", "vbr", "abr", "ext:mp4:m4a", "fps"],
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "writethumbnail": False,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        },
+        "socket_timeout": 60,
+        "retries": 5,
+        "fragment_retries": 5,
+        "continuedl": True,
+    }
+    if cookies_file:
+        opts["cookiefile"] = cookies_file
+
+    before = set(Path(out).iterdir())
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+    after = set(Path(out).iterdir())
+    return sorted(str(f) for f in (after - before))
 
 
 def _dl_story(username: str, mediaid: int, out: str) -> list[str]:
@@ -318,9 +348,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await status.edit_text("⏳ Baixando story...")
                     files = await run(_dl_story, m.group(1), int(m.group(2)), tmp)
 
-                elif (m := POST_RE.search(url)):
+                elif POST_RE.search(url):
                     await status.edit_text("⏳ Baixando post/reel...")
-                    files = await run(_dl_post, m.group(1), tmp)
+                    files = await run(_dl_post, url, tmp)
 
                 else:
                     await status.edit_text(
