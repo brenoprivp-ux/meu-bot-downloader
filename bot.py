@@ -291,6 +291,68 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Testa a conexão com o Instagram e mostra o resultado detalhado."""
+    await update.message.reply_text("🔍 Testando conexão com Instagram...")
+
+    if not os.path.isfile(COOKIES_FILE):
+        await update.message.reply_text("❌ cookies.txt não encontrado.")
+        return
+
+    import http.cookiejar as hcj, requests as req
+
+    jar = hcj.MozillaCookieJar()
+    jar.load(COOKIES_FILE, ignore_discard=True, ignore_expires=True)
+    s = req.Session()
+    cookies = {}
+    for c in jar:
+        if "instagram.com" in c.domain:
+            s.cookies.set(c.name, c.value, domain=c.domain, path=c.path)
+            cookies[c.name] = c.value
+
+    s.headers.update({
+        "User-Agent": "Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; pt_BR; 453709483)",
+        "X-IG-App-ID": "936619743392459",
+        "X-CSRFToken": cookies.get("csrftoken", ""),
+        "Accept-Language": "pt-BR",
+    })
+
+    results = []
+
+    # Teste 1: story pelo mediaid (URL que você enviou)
+    mediaid = "3927525379527280424"
+    try:
+        r = s.get(f"https://www.instagram.com/api/v1/media/{mediaid}/info/", timeout=15)
+        results.append(f"*Story /media/info/* → {r.status_code}\n{r.text[:200]}")
+    except Exception as e:
+        results.append(f"*Story /media/info/* → erro: `{e}`")
+
+    # Teste 2: story pelo mediaid no i.instagram.com
+    try:
+        r = s.get(f"https://i.instagram.com/api/v1/media/{mediaid}/info/", timeout=15)
+        results.append(f"*Story i.ig /media/info/* → {r.status_code}\n{r.text[:200]}")
+    except Exception as e:
+        results.append(f"*Story i.ig /media/info/* → erro: `{e}`")
+
+    # Teste 3: highlight
+    highlight_id = "18042166463437142"
+    try:
+        r = s.get(f"https://i.instagram.com/api/v1/feed/reels_media/", params={"reel_ids": f"highlight:{highlight_id}"}, timeout=15)
+        results.append(f"*Highlight reels_media/* → {r.status_code}\n{r.text[:200]}")
+    except Exception as e:
+        results.append(f"*Highlight reels_media/* → erro: `{e}`")
+
+    # Teste 4: post normal (para comparar)
+    try:
+        r = s.get("https://www.instagram.com/api/v1/media/3458368697837225929/info/", timeout=15)
+        results.append(f"*Post /media/info/* → {r.status_code}\n{r.text[:200]}")
+    except Exception as e:
+        results.append(f"*Post /media/info/* → erro: `{e}`")
+
+    for res in results:
+        await update.message.reply_text(res, parse_mode=ParseMode.MARKDOWN)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
@@ -372,8 +434,9 @@ def main() -> None:
     if not BOT_TOKEN:
         raise ValueError("Configure TELEGRAM_BOT_TOKEN")
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help",  start))
+    app.add_handler(CommandHandler("start",  start))
+    app.add_handler(CommandHandler("help",   start))
+    app.add_handler(CommandHandler("debug",  debug_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🤖 Bot iniciado!")
     app.run_polling(allowed_updates=["message"], drop_pending_updates=True)
