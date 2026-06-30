@@ -151,21 +151,55 @@ def _dl_post(shortcode: str, out: str) -> list[str]:
 
 def _dl_story(username: str, mediaid: int, out: str) -> list[str]:
     """
-    Baixa story diretamente pelo mediaid — sem precisar buscar user_id.
-    O mediaid já está na URL do story, então usamos /api/v1/media/{mediaid}/info/
+    Baixa story. O endpoint /media/{id}/info/ exige o formato "{pk}_{user_id}",
+    não o pk sozinho — por isso buscamos o user_id primeiro, mas usando o
+    endpoint público de perfil (sem rate limit agressivo como o /users/search/).
     """
     s = get_session()
 
-    # Acessa a mídia diretamente pelo ID — sem rate limit de busca de usuário
-    for base in ["https://www.instagram.com", "https://i.instagram.com"]:
-        resp = s.get(f"{base}/api/v1/media/{mediaid}/info/", timeout=30)
-        if resp.status_code == 200:
-            break
+    # Busca o user_id via endpoint público de perfil (HTML __a=1, sem rate limit do app)
+    resp = s.get(
+        f"https://www.instagram.com/{username}/",
+        params={"__a": "1", "__d": "dis"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+        timeout=30,
+    )
+    user_id = None
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+            user_id = (
+                data.get("graphql", {}).get("user", {}).get("id")
+                or data.get("user", {}).get("id")
+                or data.get("data", {}).get("user", {}).get("id")
+            )
+        except Exception:
+            pass
+
+    # Fallback: usa o endpoint web_profile_info com pausa para evitar 429
+    if not user_id:
+        import time
+        time.sleep(2)
+        resp = s.get(
+            f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+            timeout=30,
+        )
         if resp.status_code == 429:
-            raise ValueError("Instagram bloqueou temporariamente. Tente em alguns minutos.")
+            raise ValueError("Instagram bloqueou temporariamente as buscas. Tente novamente em alguns minutos.")
+        if resp.status_code == 200:
+            user_id = resp.json().get("data", {}).get("user", {}).get("id")
+
+    if not user_id:
+        raise ValueError(f"Não foi possível identificar o usuário @{username}.")
+
+    # Agora monta o ID composto e busca a mídia
+    full_media_id = f"{mediaid}_{user_id}"
+    resp = s.get(f"https://www.instagram.com/api/v1/media/{full_media_id}/info/", timeout=30)
 
     if resp.status_code == 404:
         raise ValueError("Story não encontrado ou já expirou (stories duram 24h).")
+    if resp.status_code == 429:
+        raise ValueError("Instagram bloqueou temporariamente. Tente em alguns minutos.")
     resp.raise_for_status()
 
     items = resp.json().get("items", [])
@@ -342,15 +376,31 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         results.append(f"*Highlight reels_media/* → erro: `{e}`")
 
-    # Teste 4: post normal (para comparar)
+    # Teste 4: busca de user_id via endpoint público (__a=1)
     try:
-        r = s.get("https://www.instagram.com/api/v1/media/3458368697837225929/info/", timeout=15)
-        results.append(f"*Post /media/info/* → {r.status_code}\n{r.text[:200]}")
+        r = s.get(
+            "https://www.instagram.com/af.existe/",
+            params={"__a": "1", "__d": "dis"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            timeout=15,
+        )
+        results.append(f"*Perfil __a=1* → {r.status_code}\n{r.text[:300]}")
     except Exception as e:
-        results.append(f"*Post /media/info/* → erro: `{e}`")
+        results.append(f"*Perfil __a=1* → erro: {e}")
+
+    # Teste 5: busca de user_id via web_profile_info (com pausa)
+    try:
+        import time
+        time.sleep(2)
+        r = s.get("https://www.instagram.com/api/v1/users/web_profile_info/?username=af.existe", timeout=15)
+        results.append(f"*web_profile_info* → {r.status_code}\n{r.text[:300]}")
+    except Exception as e:
+        results.append(f"*web_profile_info* → erro: {e}")
 
     for res in results:
-        await update.message.reply_text(res, parse_mode=ParseMode.MARKDOWN)
+        # Sem parse_mode para evitar que caracteres do JSON quebrem o Markdown
+        plain = res.replace("*", "").replace("`", "")
+        await update.message.reply_text(plain)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
