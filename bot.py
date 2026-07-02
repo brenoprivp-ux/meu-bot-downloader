@@ -160,9 +160,9 @@ def _dl_story(username: str, mediaid: int, out: str) -> list[str]:
     # passando o username como reel_ids — evita qualquer busca de user_id.
     data = None
     for base in ["https://i.instagram.com", "https://www.instagram.com"]:
+        # URL manual — sem params={} para evitar encoding do ":" e outros caracteres
         resp = s.get(
-            f"{base}/api/v1/feed/reels_media/",
-            params={"reel_ids": username},
+            f"{base}/api/v1/feed/reels_media/?reel_ids={username}",
             timeout=30,
         )
         if resp.status_code == 429:
@@ -175,7 +175,7 @@ def _dl_story(username: str, mediaid: int, out: str) -> list[str]:
         resp.raise_for_status()
 
     reels_dict = data.get("reels", {})
-    # A chave pode ser o username ou o user_id — pega o primeiro valor disponível
+    # A chave pode ser o username ou o user_id numérico
     reel = next(iter(reels_dict.values()), None) if reels_dict else None
 
     if not reel or not reel.get("items"):
@@ -216,8 +216,7 @@ def _dl_highlight(highlight_id: int, out: str) -> list[str]:
     data = None
     for base in ["https://i.instagram.com", "https://www.instagram.com"]:
         resp = s.get(
-            f"{base}/api/v1/feed/reels_media/",
-            params={"reel_ids": f"highlight:{highlight_id}"},
+            f"{base}/api/v1/feed/reels_media/?reel_ids=highlight:{highlight_id}",
             timeout=30,
         )
         if resp.status_code == 429:
@@ -358,7 +357,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Teste 3: highlight
     highlight_id = "18042166463437142"
     try:
-        r = s.get(f"https://i.instagram.com/api/v1/feed/reels_media/", params={"reel_ids": f"highlight:{highlight_id}"}, timeout=15)
+        r = s.get(f"https://i.instagram.com/api/v1/feed/reels_media/?reel_ids=highlight:{highlight_id}", timeout=15)
         results.append(f"*Highlight reels_media/* → {r.status_code}\n{r.text[:200]}")
     except Exception as e:
         results.append(f"*Highlight reels_media/* → erro: `{e}`")
