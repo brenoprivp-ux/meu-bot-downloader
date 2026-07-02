@@ -149,47 +149,77 @@ def _dl_post(shortcode: str, out: str) -> list[str]:
 
 # ─── Download: Story ───────────────────────────────────────────────────────────
 
+def _get_user_id(s, username: str) -> str:
+    """
+    Busca o user_id numérico de um username via GraphQL público.
+    Não requer autenticação e não tem rate limit agressivo.
+    """
+    import urllib.parse
+    variables = urllib.parse.quote('{"username":"' + username + '","include_reel":false}')
+    url = f"https://www.instagram.com/graphql/query/?query_hash=c9100bf9110dd6361671f113dd02e7d&variables={variables}"
+    headers_bkp = dict(s.headers)
+    # Usa User-Agent de browser para o GraphQL público
+    s.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    s.headers["X-Requested-With"] = "XMLHttpRequest"
+    s.headers["Referer"] = f"https://www.instagram.com/{username}/"
+    try:
+        resp = s.get(url, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            user_id = data.get("data", {}).get("user", {}).get("id")
+            if user_id:
+                return user_id
+    except Exception:
+        pass
+    finally:
+        s.headers.update(headers_bkp)
+
+    # Fallback: tenta web_profile_info com pausa
+    import time
+    time.sleep(3)
+    resp = s.get(
+        f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+        timeout=20,
+    )
+    if resp.status_code == 200:
+        user_id = resp.json().get("data", {}).get("user", {}).get("id")
+        if user_id:
+            return user_id
+
+    raise ValueError(f"Não consegui obter o ID do usuário @{username}. Tente novamente em instantes.")
+
+
 def _dl_story(username: str, mediaid: int, out: str) -> list[str]:
     """
-    Baixa story usando /api/v1/feed/reels_media/?reel_ids={username} —
-    o mesmo endpoint que já funciona para destaques, sem precisar buscar user_id.
+    Baixa story via /api/v1/feed/reels_media/?reel_ids={user_id} —
+    o endpoint exige user_id numérico, não username.
     """
     s = get_session()
 
-    # Usa o MESMO endpoint que já funciona pra destaques (reels_media),
-    # passando o username como reel_ids — evita qualquer busca de user_id.
-    data = None
-    for base in ["https://i.instagram.com", "https://www.instagram.com"]:
-        # URL manual — sem params={} para evitar encoding do ":" e outros caracteres
-        resp = s.get(
-            f"{base}/api/v1/feed/reels_media/?reel_ids={username}",
-            timeout=30,
-        )
-        if resp.status_code == 429:
-            raise ValueError("Instagram bloqueou temporariamente. Tente em alguns minutos.")
-        if resp.status_code == 200:
-            data = resp.json()
-            break
+    user_id = _get_user_id(s, username)
 
-    if not data:
+    resp = s.get(
+        f"https://i.instagram.com/api/v1/feed/reels_media/?reel_ids={user_id}",
+        timeout=30,
+    )
+    if resp.status_code == 429:
+        raise ValueError("Instagram bloqueou temporariamente. Tente em alguns minutos.")
+    if resp.status_code != 200:
         resp.raise_for_status()
 
-    reels_dict = data.get("reels", {})
-    # A chave pode ser o username ou o user_id numérico
+    reels_dict = resp.json().get("reels", {})
     reel = next(iter(reels_dict.values()), None) if reels_dict else None
 
     if not reel or not reel.get("items"):
-        raise ValueError("Nenhum story ativo encontrado para esse usuário (stories duram 24h).")
+        raise ValueError("Nenhum story ativo encontrado. Pode ter expirado (stories duram 24h).")
 
-    # Encontra o item específico pelo mediaid da URL
+    # Procura o mediaid exato; se não achar, pega o mais recente
     item = None
     for it in reel["items"]:
         pk = str(it.get("pk") or it.get("id", "").split("_")[0])
         if pk == str(mediaid):
             item = it
             break
-
-    # Se não achou o mediaid exato, pega o mais recente como fallback
     if item is None:
         item = reel["items"][-1]
 
